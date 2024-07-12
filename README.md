@@ -1,10 +1,10 @@
 # xLSTM: Extended Long Short-Term Memory
 
-simple xLSTM implementation in pytorch
-[arxiv](https://arxiv.org/abs/2405.04517)
+a simple xLSTM implementation in pytorch
+- [arxiv](https://arxiv.org/abs/2405.04517)
 
 <div align="center">
-    <img src="./assets/xlstm.png" width=750 height=250>
+    <img src="./assets/xlstm.png" width=750 height=450>
 </div>
 
 ### References:
