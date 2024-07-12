@@ -5,7 +5,7 @@ from tqdm import tqdm
 
 from model import xLSTM
 
-with open("input.txt", "r", encoding="utf-8") as f:
+with open("./data/input.txt", "r", encoding="utf-8") as f:
     text = f.read()
 
 chars = sorted(list(set(text)))
