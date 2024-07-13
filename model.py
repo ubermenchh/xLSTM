@@ -1,6 +1,6 @@
+import math
 import torch 
 import torch.nn as nn 
-import torch.nn.functional as F
 
 class sLSTMCell(nn.Module):
     def __init__(self, input_size, hidden_size, device="cpu"):
@@ -22,23 +22,24 @@ class sLSTMCell(nn.Module):
 
     def forward(self, input, hx):
         h, c, n, m = hx 
+        # out = w.T @ x + r @ h + b
         gates = input @ self.weight_ih.T + h @ self.weight_hh.T + self.bias 
 
-        z_tilde, i_tilde, f_tilde, o_tilde = gates.chunk(4, 1)
+        z_tilde, i_tilde, f_tilde, o_tilde = gates.chunk(4, 1) 
 
-        z = torch.tanh(z_tilde)
-        i = torch.exp(i_tilde)
-        f = torch.exp(f_tilde)
-        o = torch.sigmoid(o_tilde)
+        z = torch.tanh(z_tilde) # cell input
+        i = torch.exp(i_tilde) # input gate
+        f = torch.exp(f_tilde) # forget gate
+        o = torch.sigmoid(o_tilde) # output gate
 
-        m_t = torch.maximum(torch.log(f) + m, torch.log(i))
-        i_prime = torch.exp(torch.log(i) - m_t)
-        f_prime = torch.exp(torch.log(f) + m - m_t)
+        m_t = torch.maximum(torch.log(f) + m, torch.log(i)) # stabilizer gate
+        i_prime = torch.exp(torch.log(i) - m_t) # stabilizer input gate 
+        f_prime = torch.exp(torch.log(f) + m - m_t) # stabilizer forget gate 
 
-        c = f_prime * c + i_prime * z 
-        n = f_prime * n + i_prime 
+        c = f_prime * c + i_prime * z # cell state 
+        n = f_prime * n + i_prime # normalizer state
         h_tilde = c / n 
-        h = o * h_tilde 
+        h = o * h_tilde # hidden state
 
         return h, c, n, m_t
 
@@ -86,9 +87,13 @@ class mLSTMCell(nn.Module):
         self.hidden_size = hidden_size 
         self.device = device 
 
-        self.weight_ih = nn.Parameter(torch.randn(3 * hidden_size, input_size, device=device))
-        self.weight_hh = nn.Parameter(torch.randn(3 * hidden_size, hidden_size, device=device))
-        self.bias = nn.Parameter(torch.randn(3 * hidden_size, device=device))
+        # Input, Forget and Output gates
+        self.w_i = nn.Parameter(torch.randn(hidden_size, input_size, device=device))
+        self.w_f = nn.Parameter(torch.randn(hidden_size, input_size, device=device))
+        self.w_o = nn.Parameter(torch.randn(hidden_size, input_size, device=device))
+        self.b_i = nn.Parameter(torch.zeros(hidden_size, device=device))
+        self.b_f = nn.Parameter(torch.zeros(hidden_size, device=device))
+        self.b_o = nn.Parameter(torch.zeros(hidden_size, device=device))
 
         self.w_q = nn.Linear(input_size, hidden_size, device=device)
         self.w_k = nn.Linear(input_size, hidden_size, device=device)
@@ -97,9 +102,13 @@ class mLSTMCell(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self):
-        nn.init.xavier_uniform_(self.weight_ih)
-        nn.init.xavier_uniform_(self.weight_hh)
-        nn.init.zeros_(self.bias)
+        nn.init.xavier_uniform_(self.w_i)
+        nn.init.xavier_uniform_(self.w_f)
+        nn.init.xavier_uniform_(self.w_o)
+
+        nn.init.zeros_(self.b_i)
+        nn.init.zeros_(self.b_f)
+        nn.init.zeros_(self.b_o)
 
         nn.init.xavier_uniform_(self.w_q.weight)
         nn.init.xavier_uniform_(self.w_k.weight)
@@ -110,23 +119,27 @@ class mLSTMCell(nn.Module):
         nn.init.zeros_(self.w_v.bias)
 
     def forward(self, input, hx):
-        h, c = hx 
-        gates = input @ self.weight_ih.T + h @ self.weight_hh.T + self.bias 
+        h, c, n = hx
 
-        i, f, o = gates.chunk(1, 3)
+        # compute gates 
+        i_t = torch.exp(input @ self.w_i.T + self.b_i) # input gate 
+        f_t = torch.sigmoid(input @ self.w_f.T + self.b_f) # forget gate 
+        o_t = torch.sigmoid(input @ self.w_o.T + self.b_o) # output gate 
 
-        i = torch.exp(i) 
-        f = torch.exp(f)
-        o = torch.sigmoid(o)
+        q_t = self.w_q(input) # query
+        k_t = self.w_k(input) / math.sqrt(self.hidden_size) # key
+        v_t = self.w_v(input) # value
 
-        q = self.w_q(input)
-        k = self.w_k(input)
-        v = self.w_v(input)
+        # update cell state and normalizer state 
+        c = f_t * c + i_t * (v_t * k_t) # cell_state 
+        n = f_t * n + i_t * k_t # normalizer_state
 
-        c = f.unsqueeze(2) * c + i.unsqueeze(2) * torch.bmm(v.unsqueeze(2), k.unsqueeze(1))
-        h = o * torch.bmm(q.unsqueeze(1), c).squeeze(1)
+        # compute hidden state 
+        h_tilde = c * q_t 
+        denom = torch.clamp(torch.abs(n * q_t), min=1.0)
+        h = o_t * (h_tilde / denom)
 
-        return h, c 
+        return h, c, n
 
 class mLSTM(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, dropout=0.0, device="cpu"):
@@ -148,6 +161,7 @@ class mLSTM(nn.Module):
         if hidden_state is None:
             hidden_state = [(
                 torch.zeros(bs, self.hidden_size, device=self.device),
+                torch.zeros(bs, self.hidden_size, device=self.device),
                 torch.zeros(bs, self.hidden_size, device=self.device)
             ) for _ in range(self.num_layers)]
 
@@ -155,9 +169,9 @@ class mLSTM(nn.Module):
         for t in range(seq_len):
             x = input[:, t, :]
             for layer_idx, layer in enumerate(self.layers):
-                h, c = hidden_state[layer_idx]
-                h, c = layer(x, (h, c))
-                hidden_state[layer_idx] = (h, c)
+                h, c, n = hidden_state[layer_idx]
+                h, c, n = layer(x, (h, c, n))
+                hidden_state[layer_idx] = (h, c, n)
                 x = self.dropout_layer(h) if layer_idx < self.num_layers - 1 else h 
             outputs.append(x)
 
@@ -226,7 +240,7 @@ if __name__=="__main__":
     num_layers = 2 
     num_blocks = 3 
     dropout = 0.1 
-    lstm_type = "slstm"
+    lstm_type = "mlstm"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = xLSTM(vocab_size, embed_dim, hidden_size, num_layers, num_blocks, dropout, lstm_type, device=device)
